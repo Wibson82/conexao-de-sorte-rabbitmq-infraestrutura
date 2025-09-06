@@ -1,0 +1,191 @@
+name: 🐰 RabbitMQ Infrastructure - CI/CD Pipeline
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Destino do deploy'
+        required: false
+        default: 'production'
+        type: choice
+        options: [staging, production]
+
+env:
+  SERVICE_NAME: rabbitmq-infrastructure
+  TZ: America/Sao_Paulo
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}-${{ github.event_name == 'workflow_dispatch' && inputs.environment || 'production' }}
+  cancel-in-progress: true
+
+jobs:
+  validate-compose:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    name: 🔍 Validate Docker Compose
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Validate docker-compose.yml
+        run: |
+          echo "🔍 Validating Docker Compose configuration..."
+          docker-compose config -q
+          echo "✅ Docker Compose configuration is valid"
+      
+      - name: Security scan of docker-compose
+        run: |
+          echo "🛡️ Scanning for security issues..."
+          # Check for default credentials
+          if grep -iq "rabbitmq.*guest\|password.*guest\|user.*guest" docker-compose.yml; then
+            echo "❌ Error: Default RabbitMQ credentials detected"
+            exit 1
+          fi
+          # Check for exposed management port without proper security
+          if grep -q "15672:15672" docker-compose.yml; then
+            echo "⚠️ Warning: RabbitMQ management port is exposed"
+          fi
+          echo "✅ Security scan completed"
+
+  test-infrastructure:
+    needs: validate-compose
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    name: 🧪 Test Infrastructure
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Test RabbitMQ cluster startup
+        run: |
+          echo "🚀 Testing RabbitMQ infrastructure startup..."
+          docker-compose up -d
+          
+          echo "⏳ Waiting for RabbitMQ to be ready..."
+          sleep 45
+          
+          # Test RabbitMQ connectivity
+          echo "🔍 Testing RabbitMQ connectivity..."
+          docker-compose exec -T rabbitmq rabbitmq-diagnostics -q ping || {
+            echo "❌ RabbitMQ connectivity test failed"
+            docker-compose logs
+            exit 1
+          }
+          
+          # Test management API
+          echo "🔍 Testing RabbitMQ Management API..."
+          curl -f http://localhost:15672/api/overview || {
+            echo "❌ RabbitMQ Management API test failed"
+            docker-compose logs rabbitmq
+            exit 1
+          }
+          
+          echo "✅ RabbitMQ infrastructure test completed successfully"
+          
+      - name: Test basic queue operations
+        run: |
+          echo "📨 Testing basic queue operations..."
+          
+          # Declare a test queue
+          docker-compose exec -T rabbitmq rabbitmqadmin declare queue name=test-queue durable=true
+          
+          # Publish a test message
+          docker-compose exec -T rabbitmq rabbitmqadmin publish exchange= routing_key=test-queue payload="Hello RabbitMQ"
+          
+          # Check queue status
+          docker-compose exec -T rabbitmq rabbitmqadmin list queues name messages
+          
+          echo "✅ Basic queue operations test completed"
+          
+      - name: Cleanup test environment
+        if: always()
+        run: |
+          docker-compose down -v
+          docker system prune -f
+
+  deploy-production:
+    needs: [validate-compose, test-infrastructure]
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    if: (github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.environment == 'production')) && secrets.DEPLOY_HOST != ''
+    name: 🌟 Deploy to Production
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Setup SSH key
+        uses: webfactory/ssh-agent@v0.9.0
+        with:
+          ssh-private-key: ${{ secrets.SSH_PRIVATE_KEY }}
+      
+      - name: Deploy RabbitMQ infrastructure
+        run: |
+          echo "🚀 Deploying RabbitMQ infrastructure to production..."
+          
+          # Copy files to production server
+          scp -o StrictHostKeyChecking=no docker-compose.yml ${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }}:~/rabbitmq-infrastructure/
+          scp -o StrictHostKeyChecking=no .env.example ${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }}:~/rabbitmq-infrastructure/
+          scp -o StrictHostKeyChecking=no -r config/ ${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }}:~/rabbitmq-infrastructure/ || true
+          
+          # Deploy on production server
+          ssh -o StrictHostKeyChecking=no ${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }} << 'EOF'
+            cd ~/rabbitmq-infrastructure
+            
+            echo "🛑 Stopping existing RabbitMQ services..."
+            docker-compose down || true
+            
+            echo "🧹 Cleaning up old resources..."
+            docker system prune -f || true
+            
+            echo "🚀 Starting RabbitMQ infrastructure..."
+            docker-compose up -d
+            
+            echo "⏳ Waiting for RabbitMQ cluster to be ready..."
+            sleep 60
+            
+            # Verify deployment
+            if docker-compose exec -T rabbitmq rabbitmq-diagnostics -q ping; then
+              echo "✅ RabbitMQ deployment successful and healthy!"
+              
+              # Show cluster status
+              echo "🔍 RabbitMQ cluster status:"
+              docker-compose exec -T rabbitmq rabbitmq-diagnostics cluster_status
+              
+            else
+              echo "❌ RabbitMQ deployment failed"
+              docker-compose logs
+              exit 1
+            fi
+          EOF
+          
+          echo "🎉 RabbitMQ infrastructure deployed successfully!"
+
+  notify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    name: 📢 Notification
+    if: always()
+    needs: [validate-compose, test-infrastructure, deploy-production]
+    steps:
+      - uses: 8398a7/action-slack@v3
+        if: always() && env.SLACK_WEBHOOK_URL != ''
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+        with:
+          status: ${{ job.status }}
+          channel: '#infrastructure-notifications'
+          fields: repo,message,commit,author,action,eventName,ref,workflow
+          custom_payload: |
+            {
+              "username": "GitHub Actions",
+              "icon_emoji": ":rabbit:",
+              "attachments": [{
+                "color": "${{ job.status }}" == "success" ? "good" : "${{ job.status }}" == "failure" ? "danger" : "warning",
+                "fields": [{
+                  "title": "🐰 RabbitMQ Infrastructure",
+                  "value": "Status: ${{ job.status }}\nBranch: ${{ github.ref_name }}\nCommit: ${{ github.sha }}",
+                  "short": true
+                }]
+              }]
+            }
