@@ -1,0 +1,35 @@
+version: '3.9'
+
+services:
+  rabbitmq:
+    image: rabbitmq:3.13-management-alpine
+    container_name: conexao-rabbitmq
+    hostname: conexao-rabbitmq
+    restart: unless-stopped
+    environment:
+      # Produção: injete via Key Vault/ENV (deploy-infra.yml cobre este caso)
+      RABBITMQ_DEFAULT_USER: ${RABBITMQ_DEFAULT_USER:?Defina RABBITMQ_DEFAULT_USER}
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_DEFAULT_PASS:?Defina RABBITMQ_DEFAULT_PASS}
+      RABBITMQ_DEFAULT_VHOST: ${RABBITMQ_DEFAULT_VHOST:-/}
+    ports:
+      - "15672:15672"  # Management UI (proteja via firewall)
+      - "5672:5672"    # AMQP
+    volumes:
+      - rabbitmq_data:/var/lib/rabbitmq
+    networks:
+      - conexao-network
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "ping"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+
+volumes:
+  rabbitmq_data:
+    driver: local
+
+networks:
+  conexao-network:
+    name: conexao-network
+    external: true
+
