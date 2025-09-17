@@ -1,35 +1,97 @@
-version: '3.9'
+---
+# ============================================================================
+# 🐰 CONEXÃO DE SORTE - RABBITMQ INFRAESTRUTURA
+# ============================================================================
+# Data de Criação: 17/09/2025 às 04:20 BRT
+# Última Atualização: 17/09/2025 às 04:20 BRT
+# Responsável: Sistema Automatizado
+# Versão: 1.0.0
+# ============================================================================
+#
+# RABBITMQ STANDALONE - Message Broker
+# - Docker Swarm deployment
+# - Overlay encrypted network para segurança
+# - Named volumes com placement constraints
+# - Health checks otimizados para produção
+# - Secrets externos gerenciados pelo Swarm
+# ============================================================================
 
 services:
+  # ============================================================================
+  # 🐰 RABBITMQ - Message Broker
+  # ============================================================================
   rabbitmq:
-    image: rabbitmq:3.13-management-alpine
-    container_name: conexao-rabbitmq
-    hostname: conexao-rabbitmq
-    restart: unless-stopped
+    image: rabbitmq:4.1.0-management-alpine
+    hostname: conexao-rabbitmq-production
     environment:
-      # Produção: injete via Key Vault/ENV (deploy-infra.yml cobre este caso)
-      RABBITMQ_DEFAULT_USER: ${RABBITMQ_DEFAULT_USER:?Defina RABBITMQ_DEFAULT_USER}
-      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_DEFAULT_PASS:?Defina RABBITMQ_DEFAULT_PASS}
-      RABBITMQ_DEFAULT_VHOST: ${RABBITMQ_DEFAULT_VHOST:-/}
-    ports:
-      - "15672:15672"  # Management UI (proteja via firewall)
-      - "5672:5672"    # AMQP
+      RABBITMQ_NODE_PORT: 5673
+      RABBITMQ_MANAGEMENT_PORT: 15673
+    secrets:
+      - RABBITMQ_USERNAME
+      - RABBITMQ_PASSWORD
+    entrypoint:
+      - bash
+      - -c
+      - |
+        export RABBITMQ_DEFAULT_USER=$$(cat /run/secrets/RABBITMQ_USERNAME)
+        export RABBITMQ_DEFAULT_PASS=$$(cat /run/secrets/RABBITMQ_PASSWORD)
+        exec docker-entrypoint.sh rabbitmq-server
+    networks:
+      conexao-network-swarm:
+        aliases:
+          - conexao-rabbitmq-production
+          - rabbitmq-production
+          - conexao-rabbitmq
+          - rabbitmq
     volumes:
       - rabbitmq_data:/var/lib/rabbitmq
-    networks:
-      - conexao-network
+    ports:
+      - "5673:5673"
+      - "15673:15673"
     healthcheck:
       test: ["CMD", "rabbitmq-diagnostics", "ping"]
       interval: 30s
       timeout: 10s
       retries: 5
+    deploy:
+      replicas: 1
+      placement:
+        constraints:
+          - node.role == manager
+      restart_policy:
+        condition: on-failure
+        delay: 30s
+        max_attempts: 5
+        window: 300s
+      resources:
+        limits:
+          memory: 800M
+        reservations:
+          memory: 400M
 
+# ============================================================================
+# 📦 VOLUMES EXTERNOS
+# ============================================================================
 volumes:
   rabbitmq_data:
-    driver: local
-
-networks:
-  conexao-network:
-    name: conexao-network
     external: true
+    name: rabbitmq_data
 
+# ============================================================================
+# 🌐 NETWORKS EXTERNOS
+# ============================================================================
+networks:
+  conexao-network-swarm:
+    external: true
+    name: conexao-network-swarm
+
+# ============================================================================
+# 🔐 SECRETS EXTERNOS
+# ============================================================================
+secrets:
+  RABBITMQ_USERNAME:
+    external: true
+    name: RABBITMQ_USERNAME
+  RABBITMQ_PASSWORD:
+    external: true
+    name: RABBITMQ_PASSWORD

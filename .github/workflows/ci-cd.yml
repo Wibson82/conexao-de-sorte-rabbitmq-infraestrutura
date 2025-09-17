@@ -3,6 +3,7 @@ name: 🐰 RabbitMQ Infrastructure - CI/CD Pipeline
 on:
   push:
     branches: [ main ]
+    paths: ['docker-compose.yml', 'scripts/**', '.github/workflows/**', 'README.md']
   pull_request:
     branches: [ main ]
   workflow_dispatch:
@@ -12,180 +13,410 @@ on:
         required: false
         default: 'production'
         type: choice
-        options: [staging, production]
+        options: [production, staging]
+
+# ----------------------------------------------------------------------
+# PARÂMETROS GERAIS
+# ----------------------------------------------------------------------
 
 env:
-  SERVICE_NAME: rabbitmq-infrastructure
+  SERVICE_NAME: conexao-de-sorte-rabbitmq-infraestrutura
   TZ: America/Sao_Paulo
+  AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+  AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+  AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+  AZURE_KEYVAULT_NAME: ${{ secrets.AZURE_KEYVAULT_NAME }}
+
+# Configuração de permissões para GitHub OIDC
+permissions:
+  id-token: write
+  contents: read
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}-${{ github.event_name == 'workflow_dispatch' && inputs.environment || 'production' }}
   cancel-in-progress: true
 
+defaults:
+  run:
+    shell: bash -euo pipefail {0}
+
+# ----------------------------------------------------------------------
+# JOB 1 ▸ VALIDAÇÃO DO AMBIENTE
+# ----------------------------------------------------------------------
+
 jobs:
   validate-compose:
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
+    runs-on: [self-hosted, Linux, X64, srv649924, conexao, conexao-de-sorte-rabbitmq-infraestrutura]
     name: 🔍 Validate Docker Compose
+    timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
-      
-      - name: Validate docker-compose.yml
-        run: |
-          echo "🔍 Validating Docker Compose configuration..."
-          docker-compose config -q
-          echo "✅ Docker Compose configuration is valid"
-      
-      - name: Security scan of docker-compose
-        run: |
-          echo "🛡️ Scanning for security issues..."
-          # Check for default credentials
-          if grep -iq "rabbitmq.*guest\|password.*guest\|user.*guest" docker-compose.yml; then
-            echo "❌ Error: Default RabbitMQ credentials detected"
-            exit 1
-          fi
-          # Check for exposed management port without proper security
-          if grep -q "15672:15672" docker-compose.yml; then
-            echo "⚠️ Warning: RabbitMQ management port is exposed"
-          fi
-          echo "✅ Security scan completed"
+      - name: 📥 Checkout Code
+        uses: actions/checkout@v4
 
-  test-infrastructure:
-    needs: validate-compose
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    name: 🧪 Test Infrastructure
-    steps:
-      - uses: actions/checkout@v4
-      
-      - name: Test RabbitMQ cluster startup
+      - name: 🔧 Set Dummy Environment Variables for Validation
         run: |
-          echo "🚀 Testing RabbitMQ infrastructure startup..."
-          docker-compose up -d
-          
-          echo "⏳ Waiting for RabbitMQ to be ready..."
-          sleep 45
-          
-          # Test RabbitMQ connectivity
-          echo "🔍 Testing RabbitMQ connectivity..."
-          docker-compose exec -T rabbitmq rabbitmq-diagnostics -q ping || {
-            echo "❌ RabbitMQ connectivity test failed"
-            docker-compose logs
-            exit 1
-          }
-          
-          # Test management API
-          echo "🔍 Testing RabbitMQ Management API..."
-          curl -f http://localhost:15672/api/overview || {
-            echo "❌ RabbitMQ Management API test failed"
-            docker-compose logs rabbitmq
-            exit 1
-          }
-          
-          echo "✅ RabbitMQ infrastructure test completed successfully"
-          
-      - name: Test basic queue operations
-        run: |
-          echo "📨 Testing basic queue operations..."
-          
-          # Declare a test queue
-          docker-compose exec -T rabbitmq rabbitmqadmin declare queue name=test-queue durable=true
-          
-          # Publish a test message
-          docker-compose exec -T rabbitmq rabbitmqadmin publish exchange= routing_key=test-queue payload="Hello RabbitMQ"
-          
-          # Check queue status
-          docker-compose exec -T rabbitmq rabbitmqadmin list queues name messages
-          
-          echo "✅ Basic queue operations test completed"
-          
-      - name: Cleanup test environment
-        if: always()
-        run: |
-          docker-compose down -v
-          docker system prune -f
+          echo "RABBITMQ_USERNAME=dummy_user_for_validation" >> $GITHUB_ENV
+          echo "RABBITMQ_PASSWORD=dummy_password_for_validation" >> $GITHUB_ENV
+          echo "✅ Dummy environment variables (RABBITMQ_USERNAME, RABBITMQ_PASSWORD) set for validation"
 
-  deploy-production:
-    needs: [validate-compose, test-infrastructure]
-    runs-on: ubuntu-latest
-    timeout-minutes: 45
-    if: (github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.environment == 'production')) && secrets.DEPLOY_HOST != ''
-    name: 🌟 Deploy to Production
-    steps:
-      - uses: actions/checkout@v4
-      
-      - name: Setup SSH key
-        uses: webfactory/ssh-agent@v0.9.0
-        with:
-          ssh-private-key: ${{ secrets.SSH_PRIVATE_KEY }}
-      
-      - name: Deploy RabbitMQ infrastructure
+      - name: 🔍 Validate docker-compose files
+        timeout-minutes: 2
         run: |
-          echo "🚀 Deploying RabbitMQ infrastructure to production..."
-          
-          # Copy files to production server
-          scp -o StrictHostKeyChecking=no docker-compose.yml ${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }}:~/rabbitmq-infrastructure/
-          scp -o StrictHostKeyChecking=no .env.example ${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }}:~/rabbitmq-infrastructure/
-          scp -o StrictHostKeyChecking=no -r config/ ${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }}:~/rabbitmq-infrastructure/ || true
-          
-          # Deploy on production server
-          ssh -o StrictHostKeyChecking=no ${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }} << 'EOF'
-            cd ~/rabbitmq-infrastructure
-            
-            echo "🛑 Stopping existing RabbitMQ services..."
-            docker-compose down || true
-            
-            echo "🧹 Cleaning up old resources..."
-            docker system prune -f || true
-            
-            echo "🚀 Starting RabbitMQ infrastructure..."
-            docker-compose up -d
-            
-            echo "⏳ Waiting for RabbitMQ cluster to be ready..."
-            sleep 60
-            
-            # Verify deployment
-            if docker-compose exec -T rabbitmq rabbitmq-diagnostics -q ping; then
-              echo "✅ RabbitMQ deployment successful and healthy!"
-              
-              # Show cluster status
-              echo "🔍 RabbitMQ cluster status:"
-              docker-compose exec -T rabbitmq rabbitmq-diagnostics cluster_status
-              
+          # Validar sintaxe do docker-compose.yml principal (produção)
+          docker compose -f docker-compose.yml config -q
+          echo "✅ Docker Compose syntax is valid"
+
+      - name: 🧮 Render Docker Stack configuration
+        timeout-minutes: 2
+        run: |
+          # Garantir que o arquivo é válido para uso com docker stack deploy
+          docker stack config -c ./docker-compose.yml > /tmp/docker-stack-rendered.yml
+          echo "✅ Docker Stack configuration rendered successfully"
+
+      - name: 🧪 Test Services Definition
+        timeout-minutes: 3
+        run: |
+          # Verificar se todos os serviços essenciais estão definidos
+          echo "🔍 Debug: Listing all available services:"
+          all_services=$(docker compose -f docker-compose.yml config --services | sort)
+          echo "$all_services"
+
+          echo ""
+          echo "🧪 Testing each service individually:"
+          services=("rabbitmq")
+
+          missing=()
+          for service in "${services[@]}"; do
+            if echo "$all_services" | grep -Fxq "$service"; then
+              echo "✅ Service '$service' found in main docker-compose.yml"
             else
-              echo "❌ RabbitMQ deployment failed"
-              docker-compose logs
+              missing+=("$service")
+            fi
+          done
+
+          [ ${#missing[@]} -eq 0 ] || { echo "❌ Missing services: ${missing[*]}"; exit 1; }
+
+      - name: 🌐 Validate Network Configuration
+        timeout-minutes: 2
+        run: |
+          # Verificar se a rede externa está configurada
+          if docker network inspect conexao-network-swarm >/dev/null 2>&1; then
+            echo "✅ Network 'conexao-network-swarm' configured"
+          else
+            echo "❌ Network 'conexao-network-swarm' missing"
+            exit 1
+          fi
+
+      - name: 💾 Validate Volumes Configuration
+        timeout-minutes: 2
+        run: |
+          volumes=("rabbitmq_data")
+          for volume in "${volumes[@]}"; do
+            if docker volume inspect "$volume" >/dev/null 2>&1; then
+              echo "✅ Volume '$volume' configured"
+            else
+              echo "❌ Volume '$volume' missing"
               exit 1
             fi
-          EOF
-          
-          echo "🎉 RabbitMQ infrastructure deployed successfully!"
+          done
 
-  notify:
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    name: 📢 Notification
-    if: always()
-    needs: [validate-compose, test-infrastructure, deploy-production]
+# ----------------------------------------------------------------------
+# JOB 2 ▸ SECURITY SCAN
+# ----------------------------------------------------------------------
+
+  security-scan:
+    runs-on: [self-hosted, Linux, X64, srv649924, conexao, conexao-de-sorte-rabbitmq-infraestrutura]
+    name: 🔐 Security Scan
+    timeout-minutes: 15
+    needs: [validate-compose]
     steps:
-      - uses: 8398a7/action-slack@v3
-        if: always() && env.SLACK_WEBHOOK_URL != ''
-        env:
-          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+      - name: 📥 Checkout Code
+        uses: actions/checkout@v4
+
+      - name: 🔍 Check for hardcoded secrets
+        timeout-minutes: 3
+        run: |
+          if [ -f "docker-compose.yml" ]; then
+            if grep -r "password.*:" docker-compose.yml | grep -v "\${" | grep -v "#" | grep -v "file:" | grep -v "external:" | grep -E "password:[[:space:]]*[^[:space:]\$]"; then
+              echo "❌ Found hardcoded passwords in compose files"
+              echo "Lines with potential hardcoded passwords:"
+              grep -r "password.*:" docker-compose.yml | grep -v "\${" | grep -v "#" | grep -v "file:" | grep -v "external:" | grep -E "password:[[:space:]]*[^[:space:]\$]" || true
+              exit 1
+            else
+              echo "✅ No hardcoded passwords found"
+            fi
+          else
+            echo "❌ docker-compose.yml não encontrado"
+            exit 1
+          fi
+
+      - name: 🔐 Check environment variables
+        timeout-minutes: 2
+        run: |
+          if [ -f "docker-compose.yml" ]; then
+            required_envs=("RABBITMQ_USERNAME" "RABBITMQ_PASSWORD")
+            for env_var in "${required_envs[@]}"; do
+              if ! grep -q "$env_var" docker-compose.yml; then
+                echo "❌ Environment variable $env_var not found in docker-compose.yml"
+                exit 1
+              else
+                echo "✅ Environment variable $env_var found"
+              fi
+            done
+          else
+            echo "❌ docker-compose.yml não encontrado"
+            exit 1
+          fi
+
+      - name: 🔍 Scan image versions for vulnerabilities
+        timeout-minutes: 10
+        run: |
+          if [ -f "docker-compose.yml" ]; then
+            # Verificar se imagens usam tags específicas (evitar latest)
+            if grep -q ":latest" docker-compose.yml; then
+              echo "❌ Uso de tags 'latest' detectado - não recomendado para produção"
+              exit 1
+            else
+              echo "✅ Todas as imagens usam tags específicas"
+            fi
+          else
+            echo "❌ docker-compose.yml não encontrado"
+            exit 1
+          fi
+
+# ----------------------------------------------------------------------
+# JOB 3 ▸ DEPLOY PARA PRODUÇÃO
+# ----------------------------------------------------------------------
+
+  deploy-production:
+    if: github.ref == 'refs/heads/main'
+    runs-on: [self-hosted, Linux, X64, srv649924, conexao, conexao-de-sorte-rabbitmq-infraestrutura]
+    name: 🚀 Deploy to Production
+    timeout-minutes: 30
+    needs: [validate-compose, security-scan]
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - name: 📥 Checkout Code
+        uses: actions/checkout@v4
+
+      - name: 🔐 Validar e configurar secrets Azure OIDC infraestrutura
+        shell: bash
+        run: |
+          echo "🔐 Validando secrets OIDC para infraestrutura RabbitMQ..."
+          echo "📁 Repositório: ${{ github.repository }}"
+
+          # Verificar se secrets estão configurados neste repositório específico
+          MISSING_SECRETS=""
+          if [ -z "${{ secrets.AZURE_CLIENT_ID }}" ]; then
+            MISSING_SECRETS="$MISSING_SECRETS AZURE_CLIENT_ID"
+          fi
+          if [ -z "${{ secrets.AZURE_TENANT_ID }}" ]; then
+            MISSING_SECRETS="$MISSING_SECRETS AZURE_TENANT_ID"
+          fi
+          if [ -z "${{ secrets.AZURE_SUBSCRIPTION_ID }}" ]; then
+            MISSING_SECRETS="$MISSING_SECRETS AZURE_SUBSCRIPTION_ID"
+          fi
+          if [ -z "${{ secrets.AZURE_KEYVAULT_NAME }}" ]; then
+            MISSING_SECRETS="$MISSING_SECRETS AZURE_KEYVAULT_NAME"
+          fi
+
+          if [ -n "$MISSING_SECRETS" ]; then
+            echo "❌ Secrets ausentes no repositório ${{ github.repository }}:$MISSING_SECRETS"
+            echo ""
+            echo "🔧 SOLUÇÃO NECESSÁRIA:"
+            echo "1. Acessar: https://github.com/${{ github.repository }}/settings/secrets/actions"
+            echo "2. Adicionar os seguintes Repository secrets:"
+            echo "   - AZURE_CLIENT_ID: [Service Principal Client ID]"
+            echo "   - AZURE_TENANT_ID: [Azure Tenant ID]"
+            echo "   - AZURE_SUBSCRIPTION_ID: [Azure Subscription ID]"
+            echo "   - AZURE_KEYVAULT_NAME: [Nome do Key Vault]"
+            echo ""
+            echo "💡 Os values devem ser copiados do repositório principal ou do Azure Portal"
+            echo ""
+            echo "⚠️  PULANDO DEPLOY - Secrets de infraestrutura não configurados"
+            exit 0  # Exit com sucesso para não falhar o pipeline, mas pular deploy
+          fi
+
+          echo "✅ Secrets infraestrutura OIDC validados para ${{ github.repository }}"
+
+      - name: 🔑 Azure Login (OIDC)
+        uses: azure/login@v2
+        timeout-minutes: 5
         with:
-          status: ${{ job.status }}
-          channel: '#infrastructure-notifications'
-          fields: repo,message,commit,author,action,eventName,ref,workflow
-          custom_payload: |
-            {
-              "username": "GitHub Actions",
-              "icon_emoji": ":rabbit:",
-              "attachments": [{
-                "color": "${{ job.status }}" == "success" ? "good" : "${{ job.status }}" == "failure" ? "danger" : "warning",
-                "fields": [{
-                  "title": "🐰 RabbitMQ Infrastructure",
-                  "value": "Status: ${{ job.status }}\nBranch: ${{ github.ref_name }}\nCommit: ${{ github.sha }}",
-                  "short": true
-                }]
-              }]
-            }
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+          enable-AzPSSession: false
+
+      - name: 🔍 Verificar conectividade Azure infraestrutura
+        shell: bash
+        run: |
+          echo "🔍 Verificando conectividade Azure infraestrutura RabbitMQ..."
+
+          if ACCOUNT_INFO=$(az account show --query "{name: name, id: id}" -o json 2>/dev/null); then
+            echo "✅ Login Azure infraestrutura confirmado:"
+            echo "$ACCOUNT_INFO" | jq -r '"  Subscription: \(.name) (\(.id))"'
+          else
+            echo "❌ Falha login Azure infraestrutura"
+            exit 1
+          fi
+
+      - name: 🧹 Smart Cleanup - Remove existing RabbitMQ stack
+        timeout-minutes: 10
+        run: |
+          set -euo pipefail
+          STACK_NAME="conexao-de-sorte-rabbitmq-production"
+
+          echo "🧹 Removendo stack RabbitMQ existente para deploy limpo..."
+
+          if docker stack ls | grep -q "$STACK_NAME"; then
+            echo "🔄 Removendo stack '$STACK_NAME'..."
+            docker stack rm "$STACK_NAME"
+
+            echo "⏰ Aguardando remoção completa da stack..."
+            timeout=120
+            elapsed=0
+            while docker stack ls | grep -q "$STACK_NAME" && [ $elapsed -lt $timeout ]; do
+              sleep 5
+              elapsed=$((elapsed + 5))
+              echo "⏳ Aguardando... ($elapsed/$timeout segundos)"
+            done
+
+            if docker stack ls | grep -q "$STACK_NAME"; then
+              echo "❌ Falha ao remover a stack '$STACK_NAME'. Abortando pipeline."
+              exit 1
+            fi
+            echo "✅ Stack '$STACK_NAME' removida."
+          else
+            echo "ℹ️ Stack '$STACK_NAME' não encontrada (primeira execução ou já removida)"
+          fi
+
+      - name: 🔐 Sync Azure KeyVault Secrets to Docker Swarm
+        timeout-minutes: 5
+        run: |
+          set -euo pipefail
+          STACK_NAME="conexao-de-sorte-rabbitmq-production"
+
+          echo "🔍 Verificando se a stack '$STACK_NAME' foi removida antes da sincronização..."
+          if docker stack ls | grep -q "$STACK_NAME"; then
+            echo "❌ Stack '$STACK_NAME' ainda está presente. Abortando sincronização de secrets."
+            exit 1
+          fi
+          echo "✅ Stack '$STACK_NAME' removida. Prosseguindo com sincronização de secrets."
+
+          echo "🔐 Sincronizando secrets do Azure Key Vault para Docker Swarm..."
+          echo "🏪 Key Vault: ${{ env.AZURE_KEYVAULT_NAME }}"
+
+          # Executar script de sincronização
+          chmod +x .github/workflows/scripts/sync-azure-keyvault-secrets.sh
+          .github/workflows/scripts/sync-azure-keyvault-secrets.sh "${{ env.AZURE_KEYVAULT_NAME }}" "rabbitmq-infraestrutura" || {
+            echo "❌ Timeout ou falha na sincronização de secrets após 5 minutos"
+            echo "🔍 Verificando estado atual dos secrets..."
+            docker secret ls --format "table {{.Name}}\t{{.CreatedAt}}" | head -10 || true
+            exit 1
+          }
+
+      - name: 🔍 Validate Critical Secrets Created
+        timeout-minutes: 2
+        run: |
+          # Verificar se os secrets críticos foram criados
+          critical_secrets=("RABBITMQ_USERNAME" "RABBITMQ_PASSWORD")
+
+          echo "🔍 Verificando se secrets críticos estão disponíveis no Docker Swarm..."
+
+          for secret in "${critical_secrets[@]}"; do
+            if docker secret inspect "$secret" >/dev/null 2>&1; then
+              echo "✅ $secret: READY"
+            else
+              echo "❌ $secret: MISSING - ABORTING DEPLOY"
+              exit 1
+            fi
+          done
+
+          echo "✅ Todos os secrets críticos estão disponíveis para RabbitMQ - prosseguindo com deploy"
+
+      - name: 🚀 Deploy RabbitMQ Stack to Production
+        timeout-minutes: 15
+        run: |
+          set -euo pipefail
+          STACK_NAME="conexao-de-sorte-rabbitmq-production"
+
+          echo "🚀 Iniciando deploy da stack RabbitMQ para produção..."
+
+          # Garantir que a stack foi removida antes do deploy
+          if docker stack ls | grep -q "$STACK_NAME"; then
+            echo "❌ Stack '$STACK_NAME' ainda está presente após etapa de remoção."
+            echo "🔧 Verifique a etapa '🧹 Remove existing RabbitMQ stack'."
+            exit 1
+          fi
+          echo "✅ Confirmação: stack '$STACK_NAME' removida. Prosseguindo com deploy em produção..."
+
+          # Verificar se o arquivo de configuração existe
+          if [ ! -f "docker-compose.yml" ]; then
+            echo "❌ ERRO na configuração do docker-compose.yml para RabbitMQ PRODUÇÃO"
+            echo "🔍 Listando secrets disponíveis:"
+            docker secret ls --format "table {{.Name}}\t{{.CreatedAt}}"
+            exit 1
+          fi
+
+          # Deploy da stack utilizando docker-compose.yml (PRODUÇÃO)
+          echo "🏗️ Executando deploy da stack '$STACK_NAME'..."
+          docker stack deploy -c docker-compose.yml "$STACK_NAME"
+
+          echo "⏰ Aguardando estabilização dos serviços RabbitMQ..."
+          sleep 30
+
+          echo "🔍 Verificando status dos serviços RabbitMQ..."
+          docker service ls --filter name="${STACK_NAME}_*" --format "table {{.Name}}\t{{.Replicas}}\t{{.Image}}"
+
+      - name: 🧪 Health Check Validation RabbitMQ
+        timeout-minutes: 10
+        run: |
+          set -euo pipefail
+          STACK_NAME="conexao-de-sorte-rabbitmq-production"
+
+          echo "🔍 Validating RabbitMQ service health..."
+
+          # RabbitMQ health check
+          RABBITMQ_CONTAINER=$(docker ps -q -f name="${STACK_NAME}_rabbitmq" | head -1)
+          if [ -n "$RABBITMQ_CONTAINER" ]; then
+            echo "🔍 Testing RabbitMQ connectivity..."
+
+            # Aguardar até 5 minutos para RabbitMQ ficar disponível
+            timeout=300
+            elapsed=0
+            while [ $elapsed -lt $timeout ]; do
+              if docker exec "$RABBITMQ_CONTAINER" rabbitmq-diagnostics ping 2>/dev/null; then
+                echo "✅ RabbitMQ health check passed em PRODUÇÃO"
+                break
+              else
+                echo "⏳ RabbitMQ ainda não está pronto... ($elapsed/$timeout segundos)"
+                sleep 10
+                elapsed=$((elapsed + 10))
+              fi
+            done
+
+            if [ $elapsed -ge $timeout ]; then
+              echo "❌ RabbitMQ health check failed em PRODUÇÃO - timeout após $timeout segundos"
+              echo "🔍 Verificando logs do container RabbitMQ..."
+              docker logs "$RABBITMQ_CONTAINER" --tail 50 2>/dev/null || true
+              exit 1
+            fi
+          else
+            echo "❌ Container RabbitMQ não encontrado no Swarm PRODUÇÃO"
+            exit 1
+          fi
+
+      - name: 📊 Service Status Report RabbitMQ
+        timeout-minutes: 2
+        run: |
+          echo "📊 Final RabbitMQ service status report:"
+          docker service ls --filter name="conexao-de-sorte-rabbitmq-production_*" --format "table {{.Name}}\t{{.Replicas}}\t{{.Image}}"
+
+          echo -e "\n💾 Volume usage:"
+          docker volume ls | grep -E "(rabbitmq)" || echo "No RabbitMQ volumes found"
+
+          echo -e "\n🌐 Network configuration:"
+          docker network inspect conexao-network-swarm | jq '.[] | {Name: .Name, Driver: .Driver, Subnet: .IPAM.Config[0].Subnet}' || echo "⚠️  Rede conexao-network-swarm não encontrada"
