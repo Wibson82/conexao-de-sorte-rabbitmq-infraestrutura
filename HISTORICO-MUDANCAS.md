@@ -1,5 +1,13 @@
 # 📋 HISTÓRICO DE MUDANÇAS - RABBITMQ INFRAESTRUTURA
 
+## 🗓️ **19/09/2025 - Início auditoria Hostinger (RabbitMQ)**
+
+### ✅ Itens catalogados
+- Inventário de segredos migrado para `docs/secrets-usage-map.md` com foco em Key Vault.
+- Checklist de conformidade criado em `docs/pipeline-checklist.md`.
+- Próximas etapas: alinhar OIDC/Key Vault no workflow, hardening do compose e validações locais.
+
+---
 ## 🗓️ **17/09/2025 - Padronização Workflow + Correção Runner Tags**
 
 ### ✅ **MUDANÇAS REALIZADAS**
