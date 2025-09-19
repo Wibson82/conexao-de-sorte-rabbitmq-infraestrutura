@@ -10,21 +10,73 @@ on:
 env:
   SERVICE_NAME: rabbitmq-infrastructure
 
+permissions:
+  contents: read
+  id-token: write
+
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
   validate-and-build:
-    runs-on: ubuntu-latest
+    runs-on: [ self-hosted, Linux, X64, srv649924, conexao-de-sorte-rabbitmq-infraestrutura ]
     timeout-minutes: 10
+    permissions:
+      contents: read
+      id-token: write
     steps:
       - uses: actions/checkout@v4.3.0
 
-      - name: Install dependencies
+      - name: 🔎 Validar identificadores Azure (vars)
+        env:
+          AZURE_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID }}
+          AZURE_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
+          AZURE_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+          AZURE_KEYVAULT_NAME: ${{ vars.AZURE_KEYVAULT_NAME }}
+          AZURE_KEYVAULT_ENDPOINT: ${{ vars.AZURE_KEYVAULT_ENDPOINT }}
         run: |
-          sudo apt-get update
-          sudo apt-get install -y python3 python3-yaml
+          set -Eeuo pipefail
+          missing=()
+          for var in AZURE_CLIENT_ID AZURE_TENANT_ID AZURE_SUBSCRIPTION_ID AZURE_KEYVAULT_NAME; do
+            if [[ -z "${!var:-}" ]]; then
+              missing+=("$var")
+            fi
+          done
+          if (( ${#missing[@]} )); then
+            printf '❌ Repository Variables obrigatórias ausentes: %s\n' "${missing[*]}"
+            exit 1
+          fi
+          echo "✅ Identificadores Azure configurados via vars"
+          if [[ -z "${AZURE_KEYVAULT_ENDPOINT:-}" ]]; then
+            echo 'ℹ️ AZURE_KEYVAULT_ENDPOINT não definido (usando endpoint padrão)'
+          else
+            echo '✅ Endpoint customizado definido'
+          fi
+
+      - name: Ensure Python deps
+        run: |
+          set -Eeuo pipefail
+          if ! command -v python3 >/dev/null 2>&1; then
+            echo '❌ python3 não está disponível no runner self-hosted.' >&2
+            exit 1
+          fi
+          python3 -c "import importlib.util, subprocess, sys; import importlib; spec = importlib.util.find_spec('yaml'); subprocess.check_call([sys.executable, '-m', 'pip', 'install', '--user', 'PyYAML']) if spec is None else None"
+          echo "✅ Dependências Python disponíveis"
+
+      - name: 🔐 Azure Login (OIDC)
+        if: >-
+          ${{ vars.AZURE_CLIENT_ID != '' && vars.AZURE_TENANT_ID != '' && vars.AZURE_SUBSCRIPTION_ID != '' }}
+        uses: azure/login@v2
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      - name: 📋 Confirmar consumo mínimo do Key Vault
+        if: vars.AZURE_KEYVAULT_NAME != ''
+        run: |
+          echo 'Job de validação não consome segredos do Key Vault (lista vazia).'
 
       - name: Validate Docker Compose
         run: |
@@ -51,9 +103,12 @@ jobs:
 
   deploy-selfhosted:
     needs: validate-and-build
-    runs-on: [ self-hosted, Linux, X64, conexao, conexao-de-sorte-rabbitmq-infraestrutura ]
+    runs-on: [ self-hosted, Linux, X64, srv649924, conexao-de-sorte-rabbitmq-infraestrutura ]
     timeout-minutes: 15
     if: github.ref == 'refs/heads/main'
+    permissions:
+      contents: read
+      id-token: write
     env:
       DOCKER_NETWORK_NAME: conexao-network-swarm
       STACK_NAME: conexao-rabbitmq
@@ -69,6 +124,84 @@ jobs:
         with:
           name: rabbitmq-configs
           path: .
+
+      - name: Get Key Vault secrets (RabbitMQ)
+        id: kv
+        if: vars.AZURE_KEYVAULT_NAME != ''
+        uses: azure/get-keyvault-secrets@v1
+        with:
+          keyvault: ${{ vars.AZURE_KEYVAULT_NAME }}
+          secrets: |
+            conexao-de-sorte-rabbitmq-username
+            conexao-de-sorte-rabbitmq-password
+
+      - name: Preparar secrets do RabbitMQ
+        if: vars.AZURE_KEYVAULT_NAME != ''
+        run: |
+          set -Eeuo pipefail
+          username="${{ steps.kv.outputs.conexao-de-sorte-rabbitmq-username }}"
+          password="${{ steps.kv.outputs.conexao-de-sorte-rabbitmq-password }}"
+          if [[ -z "$username" || -z "$password" ]]; then
+            echo '❌ Segredos do RabbitMQ não retornados pelo Key Vault'
+            exit 1
+          fi
+          echo "::add-mask::$username"
+          echo "::add-mask::$password"
+          if [[ ${#password} -lt 12 ]]; then
+            echo '❌ Password muito curto (mínimo 12 caracteres)'
+            exit 1
+          fi
+          username_file="$RUNNER_TEMP/rabbitmq_username"
+          password_file="$RUNNER_TEMP/rabbitmq_password"
+          printf '%s\n' "$username" > "$username_file"
+          printf '%s\n' "$password" > "$password_file"
+          chmod 600 "$username_file" "$password_file"
+          printf 'RABBITMQ_USERNAME_FILE=%s\n' "$username_file" >> "$GITHUB_ENV"
+          printf 'RABBITMQ_PASSWORD_FILE=%s\n' "$password_file" >> "$GITHUB_ENV"
+
+      - name: Criar Docker secrets
+        if: vars.AZURE_KEYVAULT_NAME != ''
+        run: |
+          set -Eeuo pipefail
+          declare -A secrets=(
+            [RABBITMQ_USERNAME]="$RABBITMQ_USERNAME_FILE"
+            [RABBITMQ_PASSWORD]="$RABBITMQ_PASSWORD_FILE"
+          )
+          for secret_name in "${!secrets[@]}"; do
+            file="${secrets[$secret_name]}"
+            if [[ ! -f "$file" ]]; then
+              echo "❌ Arquivo do secret $secret_name não encontrado ($file)"
+              exit 1
+            fi
+            if docker secret ls --format "{{.Name}}" | grep -q "^${secret_name}$"; then
+              echo "🔄 Atualizando secret ${secret_name}"
+              docker secret rm "$secret_name" || true
+              sleep 2
+            else
+              echo "🆕 Criando secret ${secret_name}"
+            fi
+            docker secret create "$secret_name" "$file"
+          done
+          echo "✅ Secrets do RabbitMQ prontos para o deploy"
+
+      - name: 🔧 Garantir recursos Docker
+        run: |
+          set -Eeuo pipefail
+          if ! docker volume ls | grep -q '\brabbitmq_data$'; then
+            echo '📁 Criando volume rabbitmq_data'
+            docker volume create rabbitmq_data
+          else
+            echo '✅ Volume rabbitmq_data já existe'
+          fi
+          echo '🛠️ Ajustando permissões do volume para UID 999'
+          docker run --rm -v rabbitmq_data:/var/lib/rabbitmq alpine:3.20 \
+            sh -c 'chown -R 999:999 /var/lib/rabbitmq' || echo 'ℹ️ Ajuste de permissões não aplicado (verificar manualmente)'
+          if ! docker network ls | grep -q 'conexao-network-swarm'; then
+            echo '🌐 Criando rede conexao-network-swarm'
+            docker network create --driver overlay conexao-network-swarm
+          else
+            echo '✅ Rede conexao-network-swarm já existe'
+          fi
 
       - name: 🚀 Deploy RabbitMQ Stack (Swarm-Only)
         env:
