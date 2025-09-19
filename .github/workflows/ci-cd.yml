@@ -65,7 +65,7 @@ jobs:
           echo "✅ Dependências Python disponíveis"
 
       - name: 🔐 Azure Login (OIDC)
-        if: "${{ secrets.AZURE_CLIENT_ID != '' && secrets.AZURE_TENANT_ID != '' && secrets.AZURE_SUBSCRIPTION_ID != '' }}"
+        if: ${{ secrets.AZURE_CLIENT_ID != '' && secrets.AZURE_TENANT_ID != '' && secrets.AZURE_SUBSCRIPTION_ID != '' }}
         uses: azure/login@v2
         with:
           client-id: ${{ secrets.AZURE_CLIENT_ID }}
@@ -104,7 +104,7 @@ jobs:
     needs: validate-and-build
     runs-on: [ self-hosted, Linux, X64, srv649924, conexao-de-sorte-rabbitmq-infraestrutura ]
     timeout-minutes: 15
-    if: github.ref == 'refs/heads/main'
+    if: ${{ github.ref == 'refs/heads/main' }}
     permissions:
       contents: read
       id-token: write
