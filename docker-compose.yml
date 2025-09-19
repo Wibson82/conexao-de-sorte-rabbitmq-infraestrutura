@@ -23,6 +23,9 @@ services:
   rabbitmq:
     image: rabbitmq:4.1.0-management-alpine
     hostname: conexao-rabbitmq-production
+    user: "999:999"
+    init: true
+    stop_grace_period: 60s
     environment:
       RABBITMQ_NODE_PORT: 5673
       RABBITMQ_MANAGEMENT_PORT: 15673
@@ -45,6 +48,11 @@ services:
           - rabbitmq
     volumes:
       - rabbitmq_data:/var/lib/rabbitmq
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
     ports:
       - "5673:5673"
       - "15673:15673"
@@ -64,6 +72,16 @@ services:
         delay: 30s
         max_attempts: 5
         window: 300s
+      update_config:
+        parallelism: 1
+        delay: 10s
+        failure_action: rollback
+        monitor: 30s
+        order: start-first
+      rollback_config:
+        parallelism: 1
+        monitor: 30s
+        order: stop-first
       resources:
         limits:
           memory: 800M
