@@ -30,11 +30,11 @@ jobs:
 
       - name: 🔎 Validar identificadores Azure (vars)
         env:
-          AZURE_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID }}
-          AZURE_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
-          AZURE_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
-          AZURE_KEYVAULT_NAME: ${{ vars.AZURE_KEYVAULT_NAME }}
-          AZURE_KEYVAULT_ENDPOINT: ${{ vars.AZURE_KEYVAULT_ENDPOINT }}
+          AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+          AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+          AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+          AZURE_KEYVAULT_NAME: ${{ secrets.AZURE_KEYVAULT_NAME }}
+          AZURE_KEYVAULT_ENDPOINT: ${{ secrets.AZURE_KEYVAULT_ENDPOINT }}
         run: |
           set -Eeuo pipefail
           missing=()
@@ -44,10 +44,10 @@ jobs:
             fi
           done
           if (( ${#missing[@]} )); then
-            printf '❌ Repository Variables obrigatórias ausentes: %s\n' "${missing[*]}"
+            printf '❌ GitHub Secrets obrigatórios ausentes: %s\n' "${missing[*]}"
             exit 1
           fi
-          echo "✅ Identificadores Azure configurados via vars"
+          echo "✅ Identificadores Azure configurados via secrets"
           if [[ -z "${AZURE_KEYVAULT_ENDPOINT:-}" ]]; then
             echo 'ℹ️ AZURE_KEYVAULT_ENDPOINT não definido (usando endpoint padrão)'
           else
@@ -66,15 +66,15 @@ jobs:
 
       - name: 🔐 Azure Login (OIDC)
         if: >-
-          ${{ vars.AZURE_CLIENT_ID != '' && vars.AZURE_TENANT_ID != '' && vars.AZURE_SUBSCRIPTION_ID != '' }}
+          ${{ secrets.AZURE_CLIENT_ID != '' && secrets.AZURE_TENANT_ID != '' && secrets.AZURE_SUBSCRIPTION_ID != '' }}
         uses: azure/login@v2
         with:
-          client-id: ${{ vars.AZURE_CLIENT_ID }}
-          tenant-id: ${{ vars.AZURE_TENANT_ID }}
-          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
 
       - name: 📋 Confirmar consumo mínimo do Key Vault
-        if: vars.AZURE_KEYVAULT_NAME != ''
+        if: secrets.AZURE_KEYVAULT_NAME != ''
         run: |
           echo 'Job de validação não consome segredos do Key Vault (lista vazia).'
 
@@ -127,16 +127,16 @@ jobs:
 
       - name: Get Key Vault secrets (RabbitMQ)
         id: kv
-        if: vars.AZURE_KEYVAULT_NAME != ''
+        if: secrets.AZURE_KEYVAULT_NAME != ''
         uses: azure/get-keyvault-secrets@v1
         with:
-          keyvault: ${{ vars.AZURE_KEYVAULT_NAME }}
+          keyvault: ${{ secrets.AZURE_KEYVAULT_NAME }}
           secrets: |
             conexao-de-sorte-rabbitmq-username
             conexao-de-sorte-rabbitmq-password
 
       - name: Preparar secrets do RabbitMQ
-        if: vars.AZURE_KEYVAULT_NAME != ''
+        if: secrets.AZURE_KEYVAULT_NAME != ''
         run: |
           set -Eeuo pipefail
           username="${{ steps.kv.outputs.conexao-de-sorte-rabbitmq-username }}"
@@ -160,7 +160,7 @@ jobs:
           printf 'RABBITMQ_PASSWORD_FILE=%s\n' "$password_file" >> "$GITHUB_ENV"
 
       - name: Criar Docker secrets
-        if: vars.AZURE_KEYVAULT_NAME != ''
+        if: secrets.AZURE_KEYVAULT_NAME != ''
         run: |
           set -Eeuo pipefail
           declare -A secrets=(
