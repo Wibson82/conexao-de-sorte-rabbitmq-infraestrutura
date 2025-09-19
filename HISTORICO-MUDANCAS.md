@@ -8,6 +8,20 @@
 - Próximas etapas: alinhar OIDC/Key Vault no workflow, hardening do compose e validações locais.
 
 ---
+## 🗓️ **19/09/2025 - Hardening OIDC + RabbitMQ rootless**
+
+### ✅ Mudanças
+- Workflow migrado para runners Hostinger com `vars.AZURE_*` e Key Vault seletivo via `azure/get-keyvault-secrets@v1`.
+- Docker secrets criados com arquivos temporários mascarados; volume `rabbitmq_data` tem permissões ajustadas automaticamente.
+- Compose atualizado para execução rootless (`user: 999:999`), logging rotacionado e políticas de rollout/rollback.
+- Documentação complementada em `README.md`, `docs/pipeline-inventory.md` e `docs/validation-report.md`.
+
+### 🧪 Validações
+- `actionlint -config-file .github/actionlint.yaml --shellcheck=`
+- `docker compose -f docker-compose.yml config -q`
+- `hadolint`/`docker build` pendentes (ferramentas indisponíveis no host atual).
+
+---
 ## 🗓️ **17/09/2025 - Padronização Workflow + Correção Runner Tags**
 
 ### ✅ **MUDANÇAS REALIZADAS**
