@@ -29,6 +29,7 @@ jobs:
       - uses: actions/checkout@v4.3.0
 
       - name: 🔎 Validar identificadores Azure (vars)
+        id: check_secrets
         env:
           AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
           AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
@@ -45,9 +46,13 @@ jobs:
           done
           if (( ${#missing[@]} )); then
             printf '❌ GitHub Secrets obrigatórios ausentes: %s\n' "${missing[*]}"
-            exit 1
+            echo "has_azure_creds=false" >> "$GITHUB_OUTPUT"
+            echo "has_keyvault=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "✅ Identificadores Azure configurados via secrets"
+            echo "has_azure_creds=true" >> "$GITHUB_OUTPUT"
+            echo "has_keyvault=true" >> "$GITHUB_OUTPUT"
           fi
-          echo "✅ Identificadores Azure configurados via secrets"
           if [[ -z "${AZURE_KEYVAULT_ENDPOINT:-}" ]]; then
             echo 'ℹ️ AZURE_KEYVAULT_ENDPOINT não definido (usando endpoint padrão)'
           else
@@ -65,7 +70,7 @@ jobs:
           echo "✅ Dependências Python disponíveis"
 
       - name: 🔐 Azure Login (OIDC)
-        if: ${{ secrets.AZURE_CLIENT_ID != '' && secrets.AZURE_TENANT_ID != '' && secrets.AZURE_SUBSCRIPTION_ID != '' }}
+        if: ${{ steps.check_secrets.outputs.has_azure_creds == 'true' }}
         uses: azure/login@v2
         with:
           client-id: ${{ secrets.AZURE_CLIENT_ID }}
@@ -73,7 +78,7 @@ jobs:
           subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
 
       - name: 📋 Confirmar consumo mínimo do Key Vault
-        if: ${{ secrets.AZURE_KEYVAULT_NAME != '' }}
+        if: ${{ steps.check_secrets.outputs.has_keyvault == 'true' }}
         run: |
           echo 'Job de validação não consome segredos do Key Vault (lista vazia).'
 
@@ -126,7 +131,7 @@ jobs:
 
       - name: Get Key Vault secrets (RabbitMQ)
         id: kv
-        if: ${{ secrets.AZURE_KEYVAULT_NAME != '' }}
+        if: ${{ steps.check_secrets.outputs.has_keyvault == 'true' }}
         uses: azure/get-keyvault-secrets@v1
         with:
           keyvault: ${{ secrets.AZURE_KEYVAULT_NAME }}
@@ -135,7 +140,7 @@ jobs:
             conexao-de-sorte-rabbitmq-password
 
       - name: Preparar secrets do RabbitMQ
-        if: ${{ secrets.AZURE_KEYVAULT_NAME != '' }}
+        if: ${{ steps.check_secrets.outputs.has_keyvault == 'true' }}
         run: |
           set -Eeuo pipefail
           username="${{ steps.kv.outputs.conexao-de-sorte-rabbitmq-username }}"
@@ -159,7 +164,7 @@ jobs:
           printf 'RABBITMQ_PASSWORD_FILE=%s\n' "$password_file" >> "$GITHUB_ENV"
 
       - name: Criar Docker secrets
-        if: ${{ secrets.AZURE_KEYVAULT_NAME != '' }}
+        if: ${{ steps.check_secrets.outputs.has_keyvault == 'true' }}
         run: |
           set -Eeuo pipefail
           declare -A secrets=(
