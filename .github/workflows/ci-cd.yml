@@ -20,15 +20,41 @@ concurrency:
 
 jobs:
   validate-and-build:
-    runs-on: [ self-hosted, Linux, X64, conexao, conexao-de-sorte-rabbitmq-infraestrutura ]
+    runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
       contents: read
       id-token: write
+    outputs:
+      has_keyvault: ${{ steps.check_secrets.outputs.has_keyvault }}
+      has_azure_creds: ${{ steps.check_secrets.outputs.has_azure_creds }}
     steps:
-      - uses: actions/checkout@v4.3.0
+      - name: Checkout
+        uses: actions/checkout@v4.3.0
+        with:
+          fetch-depth: 1
 
-      - name: 🔎 Validar identificadores Azure (vars)
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y python3 python3-yaml jq
+
+      - name: Validate Docker Compose
+        run: |
+          docker compose -f docker-compose.yml config -q
+          echo "✅ Docker Compose syntax is valid"
+
+      - name: Security Validation - No Hardcoded Passwords
+        run: |
+          # Verificar se não há hardcoded passwords
+          if grep -r "password.*:" docker-compose.yml | grep -v "\${" | grep -v "#" | grep -v "external:"; then
+            echo "❌ Found potential hardcoded passwords"
+            exit 1
+          else
+            echo "✅ No hardcoded passwords found"
+          fi
+
+      - name: 🔎 Validar OIDC Azure
         id: check_secrets
         env:
           AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
@@ -39,7 +65,7 @@ jobs:
         run: |
           set -Eeuo pipefail
           missing=()
-          for var in AZURE_CLIENT_ID AZURE_TENANT_ID AZURE_SUBSCRIPTION_ID AZURE_KEYVAULT_NAME; do
+          for var in AZURE_CLIENT_ID AZURE_TENANT_ID AZURE_SUBSCRIPTION_ID; do
             if [[ -z "${!var:-}" ]]; then
               missing+=("$var")
             fi
@@ -49,84 +75,63 @@ jobs:
             exit 1
           fi
           echo "✅ Identificadores Azure configurados via secrets"
-          # Key Vault opcional, Azure creds obrigatórios
+
+          # Key Vault é opcional
           if [[ -n "${AZURE_KEYVAULT_NAME:-}" ]]; then
             echo "has_keyvault=true" >> "$GITHUB_OUTPUT"
           else
             echo "has_keyvault=false" >> "$GITHUB_OUTPUT"
           fi
+
           if [[ -z "${AZURE_KEYVAULT_ENDPOINT:-}" ]]; then
             echo 'ℹ️ AZURE_KEYVAULT_ENDPOINT não definido (usando endpoint padrão)'
           else
             echo '✅ Endpoint customizado definido'
           fi
 
-      - name: Ensure Python deps
+          echo "has_azure_creds=true" >> "$GITHUB_OUTPUT"
+
+      - name: Validate YAML files
         run: |
-          set -Eeuo pipefail
-          if ! command -v python3 >/dev/null 2>&1; then
-            echo '❌ python3 não está disponível no runner self-hosted.' >&2
-            exit 1
-          fi
-          python3 -c "import importlib.util, subprocess, sys; import importlib; spec = importlib.util.find_spec('yaml'); subprocess.check_call([sys.executable, '-m', 'pip', 'install', '--user', 'PyYAML']) if spec is None else None"
-          echo "✅ Dependências Python disponíveis"
+          python3 -c "
+          import yaml
+          import pathlib
 
-      - name: 🔐 Azure Login (OIDC)
-        if: ${{ steps.check_secrets.outputs.has_azure_creds == 'true' }}
-        uses: azure/login@v2
-        with:
-          client-id: ${{ secrets.AZURE_CLIENT_ID }}
-          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
-          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+          # Validar arquivos YAML principais
+          yaml_files = [
+              'docker-compose.yml'
+          ]
 
-      - name: 📋 Confirmar consumo mínimo do Key Vault
+          for file_path in yaml_files:
+              if pathlib.Path(file_path).exists():
+                  try:
+                      with open(file_path, 'r', encoding='utf-8') as f:
+                          yaml.safe_load(f)
+                      print(f'✅ YAML válido: {file_path}')
+                  except Exception as e:
+                      print(f'❌ Erro no YAML {file_path}: {e}')
+                      exit(1)
+          "
+
+      - name: ✅ Confirmar consumo mínimo do Key Vault
         if: ${{ steps.check_secrets.outputs.has_keyvault == 'true' }}
         run: |
           echo 'Job de validação não consome segredos do Key Vault (lista vazia).'
+          echo "✅ Validação de Key Vault concluída sem consumo de segredos"
 
-      - name: Validate Docker Compose
+      - name: Validation completed
         run: |
-          # Validar sintaxe do docker-compose.yml
-          docker compose -f docker-compose.yml config -q
-          echo "✅ Docker Compose syntax is valid"
+          echo "✅ Validação concluída - pronto para deploy"
 
-      - name: Security Validation
-        run: |
-          # Verificar se não há hardcoded passwords
-          if grep -r "password.*:" docker-compose.yml | grep -v "\${" | grep -v "#" | grep -v "external:"; then
-            echo "❌ Found potential hardcoded passwords"
-            exit 1
-          else
-            echo "✅ No hardcoded passwords found"
-          fi
-
-          # Verificar exposição de portas RabbitMQ (ajuste seguro)
-          if grep -E "^\\s*-\\s*[\\\"']?(5673|15673):" docker-compose.yml; then
-            echo "⚠️ WARNING: RabbitMQ ports may be exposed - ensure firewall protection"
-            echo "💡 Note: Current configuration works but consider overlay-only for maximum security"
-          else
-            echo "✅ No ports exposed - maximum security (overlay network only)"
-          fi
-
-      - name: Upload artifacts
-        uses: actions/upload-artifact@v4.5.0
-        with:
-          name: rabbitmq-configs
-          path: |
-            docker-compose.yml
 
   deploy-selfhosted:
     needs: validate-and-build
-    runs-on: [ self-hosted, Linux, X64, conexao, conexao-de-sorte-rabbitmq-infraestrutura ]
+    runs-on: [self-hosted, Linux, X64, conexao, conexao-de-sorte-rabbitmq-infraestrutura]
     timeout-minutes: 15
-    if: ${{ github.ref == 'refs/heads/main' }}
+    if: github.ref == 'refs/heads/main'
     permissions:
       contents: read
       id-token: write
-    env:
-      DOCKER_NETWORK_NAME: conexao-network-swarm
-      STACK_NAME: conexao-rabbitmq
-      COMPOSE_FILE: docker-compose.yml
     steps:
       - uses: actions/checkout@v4.3.0
         with:
