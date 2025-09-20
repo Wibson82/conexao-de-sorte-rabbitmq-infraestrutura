@@ -20,7 +20,7 @@ concurrency:
 
 jobs:
   validate-and-build:
-    runs-on: [ self-hosted, Linux, X64, srv649924, conexao-de-sorte-rabbitmq-infraestrutura ]
+    runs-on: [ self-hosted, Linux, X64, conexao, conexao-de-sorte-rabbitmq-infraestrutura ]
     timeout-minutes: 10
     permissions:
       contents: read
@@ -46,12 +46,14 @@ jobs:
           done
           if (( ${#missing[@]} )); then
             printf '❌ GitHub Secrets obrigatórios ausentes: %s\n' "${missing[*]}"
-            echo "has_azure_creds=false" >> "$GITHUB_OUTPUT"
-            echo "has_keyvault=false" >> "$GITHUB_OUTPUT"
-          else
-            echo "✅ Identificadores Azure configurados via secrets"
-            echo "has_azure_creds=true" >> "$GITHUB_OUTPUT"
+            exit 1
+          fi
+          echo "✅ Identificadores Azure configurados via secrets"
+          # Key Vault opcional, Azure creds obrigatórios
+          if [[ -n "${AZURE_KEYVAULT_NAME:-}" ]]; then
             echo "has_keyvault=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_keyvault=false" >> "$GITHUB_OUTPUT"
           fi
           if [[ -z "${AZURE_KEYVAULT_ENDPOINT:-}" ]]; then
             echo 'ℹ️ AZURE_KEYVAULT_ENDPOINT não definido (usando endpoint padrão)'
@@ -107,7 +109,7 @@ jobs:
 
   deploy-selfhosted:
     needs: validate-and-build
-    runs-on: [ self-hosted, Linux, X64, srv649924, conexao-de-sorte-rabbitmq-infraestrutura ]
+    runs-on: [ self-hosted, Linux, X64, conexao, conexao-de-sorte-rabbitmq-infraestrutura ]
     timeout-minutes: 15
     if: ${{ github.ref == 'refs/heads/main' }}
     permissions:
