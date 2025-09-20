@@ -100,6 +100,14 @@ jobs:
             echo "✅ No hardcoded passwords found"
           fi
 
+          # Verificar exposição de portas RabbitMQ (ajuste seguro)
+          if grep -E "^\\s*-\\s*[\\\"']?(5673|15673):" docker-compose.yml; then
+            echo "⚠️ WARNING: RabbitMQ ports may be exposed - ensure firewall protection"
+            echo "💡 Note: Current configuration works but consider overlay-only for maximum security"
+          else
+            echo "✅ No ports exposed - maximum security (overlay network only)"
+          fi
+
       - name: Upload artifacts
         uses: actions/upload-artifact@v4.5.0
         with:
