@@ -346,3 +346,39 @@ jobs:
 
           echo "📊 Status final dos serviços:"
           docker service ls --filter name="${STACK_NAME}_*" --format "table {{.Name}}\t{{.Replicas}}\t{{.Image}}"
+
+      - name: Traefik Health Monitor Validation
+        run: |
+          set -euo pipefail
+          HEALTH_MONITOR_URL="https://traefik.conexaodesorte.com.br/health/service/rabbitmq"
+          TIMEOUT_TOTAL=300
+          INTERVAL=10
+          elapsed=0
+          last_response=""
+          status=""
+
+          while [ $elapsed -lt $TIMEOUT_TOTAL ]; do
+            echo "🔎 Consultando Traefik (${elapsed}/${TIMEOUT_TOTAL}s)..."
+            response=$(curl -sf --max-time 10 "$HEALTH_MONITOR_URL" 2>/dev/null || true)
+            last_response="$response"
+
+            if [[ -n "$response" ]]; then
+              status=$(echo "$response" | python3 -c "import json,sys;data=json.load(sys.stdin);print(data.get('status',''))" 2>/dev/null || true)
+              status=${status//$'\n'/}
+              echo "📊 Status reportado: ${status:-indefinido}"
+
+              if [[ "$status" == "healthy" ]]; then
+                echo "✅ Traefik confirmou RabbitMQ como healthy"
+                exit 0
+              fi
+            else
+              echo "⚠️ Traefik sem resposta nesta tentativa"
+            fi
+
+            sleep "$INTERVAL"
+            elapsed=$((elapsed + INTERVAL))
+          done
+
+          echo "❌ Traefik nao confirmou RabbitMQ como healthy apos ${TIMEOUT_TOTAL}s"
+          echo "📝 Ultima resposta recebida: ${last_response:-<sem resposta>}"
+          exit 1
