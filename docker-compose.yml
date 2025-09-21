@@ -53,9 +53,10 @@ services:
       options:
         max-size: "10m"
         max-file: "5"
-    ports:
-      - "5673:5673"
-      - "15673:15673"
+    # Portas removidas para segurança - acesso apenas via Traefik
+    # ports:
+    #   - "5673:5673"   # RabbitMQ AMQP
+    #   - "15673:15673" # RabbitMQ Management
     healthcheck:
       test: ["CMD", "rabbitmq-diagnostics", "ping"]
       interval: 30s
