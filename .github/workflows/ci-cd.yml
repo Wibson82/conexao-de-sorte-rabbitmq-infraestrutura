@@ -1,4 +1,4 @@
-name: "🐰 RabbitMQ Infrastructure – CI/CD Pipeline"
+name: "🐰 RabbitMQ Infrastructure - CI/CD Pipeline"
 
 on:
   push:
