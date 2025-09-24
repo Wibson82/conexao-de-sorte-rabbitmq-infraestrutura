@@ -146,33 +146,26 @@ jobs:
           tenant-id: ${{ secrets.AZURE_TENANT_ID }}
           subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
 
-      - name: Get Key Vault secrets (RabbitMQ)
+      - name: 🔐 Get secrets from Azure Key Vault (via AZ CLI)
         if: ${{ needs.validate-and-build.outputs.has_keyvault == 'true' }}
+        shell: bash
         run: |
-          # Usar endpoint se disponível, senão usar nome com fallback
-          KEYVAULT_ENDPOINT="${{ secrets.AZURE_KEYVAULT_ENDPOINT }}"
-          if [[ -n "$KEYVAULT_ENDPOINT" ]]; then
-            KEYVAULT_NAME=$(echo "$KEYVAULT_ENDPOINT" | sed 's|https://\(.*\)\.vault\.azure\.net/.*|\1|')
-            echo "📍 Usando Key Vault do endpoint: $KEYVAULT_NAME"
-          else
-            KEYVAULT_NAME="${{ secrets.AZURE_KEYVAULT_NAME || 'kv-conexao-de-sorte' }}"
-            echo "📍 Usando Key Vault do nome: $KEYVAULT_NAME"
-          fi
-
-          # Obter secrets do RabbitMQ
-          secrets_list="conexao-de-sorte-rabbitmq-username,conexao-de-sorte-rabbitmq-password"
-
-          IFS=',' read -ra SECRETS_ARRAY <<< "$secrets_list"
-          for secret_name in "${SECRETS_ARRAY[@]}"; do
-            echo "🔍 Obtendo segredo: $secret_name"
-            secret_value=$(az keyvault secret show --vault-name "$KEYVAULT_NAME" --name "$secret_name" --query 'value' -o tsv 2>/dev/null || echo "")
-
+          echo "Fetching secrets from Azure Key Vault using Azure CLI..."
+          SECRETS_LIST=(
+            "conexao-de-sorte-rabbitmq-username"
+            "conexao-de-sorte-rabbitmq-password"
+            "conexao-de-sorte-rabbitmq-vhost"
+          )
+          for secret_name in "${SECRETS_LIST[@]}"; do
+            echo "Fetching secret: $secret_name"
+            secret_value=$(az keyvault secret show --vault-name "${{ secrets.AZURE_KEYVAULT_NAME }}" --name "$secret_name" --query "value" -o tsv 2>/dev/null)
             if [[ -n "$secret_value" ]]; then
-              echo "✅ Segredo obtido: $secret_name"
-              echo "$secret_name=$secret_value" >> $GITHUB_ENV
+              echo "::add-mask::$secret_value"
+              env_var_name=$(echo "$secret_name" | tr '-' '_' | tr '[:lower:]' '[:upper:]')
+              echo "${env_var_name}=${secret_value}" >> $GITHUB_ENV
+              echo "Secret '$secret_name' fetched and set as environment variable '${env_var_name}'."
             else
-              echo "❌ Erro ao obter segredo: $secret_name"
-              exit 1
+              echo "Warning: Secret '$secret_name' not found in Azure Key Vault."
             fi
           done
 
