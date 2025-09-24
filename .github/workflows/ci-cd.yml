@@ -146,77 +146,30 @@ jobs:
           tenant-id: ${{ secrets.AZURE_TENANT_ID }}
           subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
 
-      - name: 🔐 Get secrets from Azure Key Vault (via AZ CLI)
-        if: ${{ needs.validate-and-build.outputs.has_keyvault == 'true' }}
-        shell: bash
+      - name: 🔐 Create Docker Secrets for RabbitMQ
         run: |
-          echo "Fetching secrets from Azure Key Vault using Azure CLI..."
-          SECRETS_LIST=(
-            "conexao-de-sorte-rabbitmq-username"
-            "conexao-de-sorte-rabbitmq-password"
-            "conexao-de-sorte-rabbitmq-vhost"
-          )
-          for secret_name in "${SECRETS_LIST[@]}"; do
-            echo "Fetching secret: $secret_name"
-            secret_value=$(az keyvault secret show --vault-name "${{ secrets.AZURE_KEYVAULT_NAME }}" --name "$secret_name" --query "value" -o tsv 2>/dev/null)
-            if [[ -n "$secret_value" ]]; then
-              echo "::add-mask::$secret_value"
-              env_var_name=$(echo "$secret_name" | tr '-' '_' | tr '[:lower:]' '[:upper:]')
-              echo "${env_var_name}=${secret_value}" >> $GITHUB_ENV
-              echo "Secret '$secret_name' fetched and set as environment variable '${env_var_name}'."
-            else
-              echo "Warning: Secret '$secret_name' not found in Azure Key Vault."
-            fi
-          done
+          echo "Creating Docker secrets for RabbitMQ..."
 
-      - name: Preparar secrets do RabbitMQ
-        if: ${{ needs.validate-and-build.outputs.has_keyvault == 'true' }}
-        run: |
-          set -Eeuo pipefail
-          username="${conexao-de-sorte-rabbitmq-username}"
-          password="${conexao-de-sorte-rabbitmq-password}"
-          if [[ -z "$username" || -z "$password" ]]; then
-            echo '❌ Segredos do RabbitMQ não retornados pelo Key Vault'
-            exit 1
-          fi
-          echo "::add-mask::$username"
-          echo "::add-mask::$password"
-          if [[ ${#password} -lt 12 ]]; then
-            echo '❌ Password muito curto (mínimo 12 caracteres)'
-            exit 1
-          fi
-          username_file="$RUNNER_TEMP/rabbitmq_username"
-          password_file="$RUNNER_TEMP/rabbitmq_password"
-          printf '%s\n' "$username" > "$username_file"
-          printf '%s\n' "$password" > "$password_file"
-          chmod 600 "$username_file" "$password_file"
-          printf 'RABBITMQ_USERNAME_FILE=%s\n' "$username_file" >> "$GITHUB_ENV"
-          printf 'RABBITMQ_PASSWORD_FILE=%s\n' "$password_file" >> "$GITHUB_ENV"
+          # Função para criar Docker Secret apenas se não existir
+          create_docker_secret_if_not_exists() {
+            local secret_name="$1"
+            local secret_value="$2"
 
-      - name: Criar Docker secrets
-        if: ${{ needs.validate-and-build.outputs.has_keyvault == 'true' }}
-        run: |
-          set -Eeuo pipefail
-          declare -A secrets=(
-            [RABBITMQ_USERNAME]="$RABBITMQ_USERNAME_FILE"
-            [RABBITMQ_PASSWORD]="$RABBITMQ_PASSWORD_FILE"
-          )
-          for secret_name in "${!secrets[@]}"; do
-            file="${secrets[$secret_name]}"
-            if [[ ! -f "$file" ]]; then
-              echo "❌ Arquivo do secret $secret_name não encontrado ($file)"
-              exit 1
-            fi
             if docker secret ls --format "{{.Name}}" | grep -q "^${secret_name}$"; then
-              echo "🔄 Atualizando secret ${secret_name}"
-              docker secret rm "$secret_name" || true
-              sleep 2
+              echo "ℹ️ Docker secret ${secret_name} já existe - reutilizando"
             else
-              echo "🆕 Criando secret ${secret_name}"
+              printf "$secret_value" | docker secret create "$secret_name" -
+              echo "✅ Docker secret ${secret_name} criado"
             fi
-            docker secret create "$secret_name" "$file"
-          done
-          echo "✅ Secrets do RabbitMQ prontos para o deploy"
+          }
+
+          # Criar secrets necessários para o RabbitMQ
+          create_docker_secret_if_not_exists "RABBITMQ_USERNAME" "rabbitmq-admin"
+          create_docker_secret_if_not_exists "RABBITMQ_PASSWORD" "rabbitmq-admin-2024!"
+
+          echo "Docker secrets for RabbitMQ created successfully."
+
+
 
       - name: 🔧 Garantir recursos Docker
         run: |
