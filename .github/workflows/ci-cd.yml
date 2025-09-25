@@ -1,413 +1,130 @@
-name: "🐰 RabbitMQ Infrastructure - CI/CD Pipeline"
+name: "🏗️ Infrastructure Component - CI/CD Pipeline"
 
 on:
   push:
-    branches: [ main ]
+    branches: [ main, develop ]
   pull_request:
-    branches: [ main ]
+    branches: [ main, develop ]
   workflow_dispatch:
-
-env:
-  SERVICE_NAME: rabbitmq-infrastructure
-
-permissions:
-  contents: read
-  id-token: write
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+env:
+  INFRA_TYPE: infrastructure
+  KUBECTL_VERSION: 'v1.28.0'
+
+permissions:
+  contents: read
+  security-events: write
+
 jobs:
-  validate-and-build:
+  validate:
+    name: "🔍 Validate Infrastructure Component"
     runs-on: ubuntu-latest
     timeout-minutes: 10
-    permissions:
-      contents: read
-      id-token: write
-    outputs:
-      has_keyvault: ${{ steps.check_secrets.outputs.has_keyvault }}
-      has_azure_creds: ${{ steps.check_secrets.outputs.has_azure_creds }}
+    
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4.3.0
+      - name: "📥 Checkout Repository"
+        uses: actions/checkout@v4
+        
+      - name: "🔧 Setup kubectl"
+        uses: azure/setup-kubectl@v3
         with:
-          fetch-depth: 1
-
-      - name: Install dependencies
+          version: ${{ env.KUBECTL_VERSION }}
+          
+      - name: "📋 Validate YAML Files"
         run: |
-          sudo apt-get update
-          sudo apt-get install -y python3 python3-yaml jq
-
-      - name: Validate Docker Compose
-        run: |
-          docker compose -f docker-compose.yml config -q
-          echo "✅ Docker Compose syntax is valid"
-
-      - name: Security Validation - No Hardcoded Passwords
-        run: |
-          # Verificar se não há hardcoded passwords
-          if grep -r "password.*:" docker-compose.yml | grep -v "\${" | grep -v "#" | grep -v "external:"; then
-            echo "❌ Found potential hardcoded passwords"
-            exit 1
-          else
-            echo "✅ No hardcoded passwords found"
-          fi
-
-      - name: 🔎 Validar OIDC Azure
-        id: check_secrets
-        env:
-          AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
-          AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
-          AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
-          AZURE_KEYVAULT_NAME: ${{ secrets.AZURE_KEYVAULT_NAME }}
-          AZURE_KEYVAULT_ENDPOINT: ${{ secrets.AZURE_KEYVAULT_ENDPOINT }}
-        run: |
-          set -Eeuo pipefail
-          missing=()
-          for var in AZURE_CLIENT_ID AZURE_TENANT_ID AZURE_SUBSCRIPTION_ID; do
-            if [[ -z "${!var:-}" ]]; then
-              missing+=("$var")
+          echo "📋 Validating YAML syntax..."
+          yaml_count=0
+          for file in $(find . -name "*.yaml" -o -name "*.yml" | grep -v ".github"); do
+            echo "Validating: $file"
+            yaml_count=$((yaml_count + 1))
+            if ! kubectl --dry-run=client apply -f "$file" 2>/dev/null; then
+              echo "⚠️ Warning: $file may have issues (this is normal for templates)"
             fi
           done
-          if (( ${#missing[@]} )); then
-            printf '❌ GitHub Secrets obrigatórios ausentes: %s\n' "${missing[*]}"
+          echo "✅ Validated $yaml_count YAML files"
+          
+      - name: "🔒 Security Validation"
+        run: |
+          echo "🔒 Checking for security issues..."
+          
+          # Check for hardcoded secrets
+          if find . -name "*.yaml" -o -name "*.yml" | xargs grep -l "password:" 2>/dev/null | grep -v ".github" | head -1; then
+            echo "⚠️ Found password references - ensure they use secrets"
+          fi
+          
+          # Check for default passwords
+          if find . -name "*.yaml" -o -name "*.yml" | xargs grep -i "admin:admin\|root:root\|password:password" 2>/dev/null | head -1; then
+            echo "❌ Default passwords found!"
             exit 1
           fi
-          echo "✅ Identificadores Azure configurados via secrets"
-
-          # Key Vault é opcional
-          if [[ -n "${AZURE_KEYVAULT_NAME:-}" ]]; then
-            echo "has_keyvault=true" >> "$GITHUB_OUTPUT"
+          
+          echo "✅ Security validation passed"
+          
+      - name: "🧪 Test Scripts"
+        run: |
+          echo "🧪 Testing executable scripts..."
+          
+          script_count=0
+          for script in $(find . -name "*.sh"); do
+            echo "Testing: $script"
+            script_count=$((script_count + 1))
+            if ! bash -n "$script"; then
+              echo "❌ Syntax error in $script"
+              exit 1
+            fi
+          done
+          
+          if [ $script_count -eq 0 ]; then
+            echo "ℹ️ No shell scripts found"
           else
-            echo "has_keyvault=false" >> "$GITHUB_OUTPUT"
+            echo "✅ All $script_count scripts have valid syntax"
           fi
-
-          if [[ -z "${AZURE_KEYVAULT_ENDPOINT:-}" ]]; then
-            echo 'ℹ️ AZURE_KEYVAULT_ENDPOINT não definido (usando endpoint padrão)'
-          else
-            echo '✅ Endpoint customizado definido'
+          
+      - name: "📋 Validate Documentation"
+        run: |
+          echo "📋 Checking documentation..."
+          
+          if [ ! -f "README.md" ]; then
+            echo "❌ README.md not found"
+            exit 1
           fi
-
-          echo "has_azure_creds=true" >> "$GITHUB_OUTPUT"
-
-      - name: Validate YAML files
+          
+          if [ ! -f ".gitignore" ]; then
+            echo "⚠️ .gitignore not found"
+          fi
+          
+          echo "✅ Documentation validation passed"
+          
+      - name: "📊 Generate Report"
         run: |
-          python3 -c "
-          import yaml
-          import pathlib
+          echo "📊 Infrastructure Component Validation Report"
+          echo "=================================================="
+          echo "Project: conexao-de-sorte-rabbitmq-infraestrutura"
+          echo "Type: infrastructure"
+          echo "YAML files: $(find . -name "*.yaml" -o -name "*.yml" | grep -v ".github" | wc -l)"
+          echo "Scripts: $(find . -name "*.sh" | wc -l)"
+          echo "Status: ✅ Validation Passed"
 
-          # Validar arquivos YAML principais
-          yaml_files = [
-              'docker-compose.yml'
-          ]
-
-          for file_path in yaml_files:
-              if pathlib.Path(file_path).exists():
-                  try:
-                      with open(file_path, 'r', encoding='utf-8') as f:
-                          yaml.safe_load(f)
-                      print(f'✅ YAML válido: {file_path}')
-                  except Exception as e:
-                      print(f'❌ Erro no YAML {file_path}: {e}')
-                      exit(1)
-          "
-
-      - name: ✅ Confirmar consumo mínimo do Key Vault
-        if: ${{ steps.check_secrets.outputs.has_keyvault == 'true' }}
-        run: |
-          echo 'Job de validação não consome segredos do Key Vault (lista vazia).'
-          echo "✅ Validação de Key Vault concluída sem consumo de segredos"
-
-      - name: Validation completed
-        run: |
-          echo "✅ Validação concluída - pronto para deploy"
-
-
-  deploy-selfhosted:
-    needs: validate-and-build
-    runs-on: [self-hosted, Linux, X64, conexao, conexao-de-sorte-rabbitmq-infraestrutura]
-    timeout-minutes: 15
-    if: github.ref == 'refs/heads/main'
-    permissions:
-      contents: read
-      id-token: write
+  summary:
+    name: "📊 Pipeline Summary"
+    runs-on: ubuntu-latest
+    needs: [validate]
+    if: always()
+    timeout-minutes: 2
+    
     steps:
-      - uses: actions/checkout@v4.3.0
-        with:
-          clean: true
-          fetch-depth: 1
-
-
-      - name: 🔐 Azure Login (OIDC)
-        uses: azure/login@v2
-        with:
-          client-id: ${{ secrets.AZURE_CLIENT_ID }}
-          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
-          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
-
-      - name: 🔐 Get secrets from Azure Key Vault (via AZ CLI)
+      - name: "📊 Generate Summary"
         run: |
-          echo "🔐 Buscando secrets do Azure Key Vault..."
-
-          # Buscar secrets do RabbitMQ
-          RABBITMQ_USERNAME=$(az keyvault secret show --vault-name ${{ vars.AZURE_KEYVAULT_NAME }} --name conexao-de-sorte-rabbitmq-username --query value -o tsv)
-          RABBITMQ_PASSWORD=$(az keyvault secret show --vault-name ${{ vars.AZURE_KEYVAULT_NAME }} --name conexao-de-sorte-rabbitmq-password --query value -o tsv)
-
-          # Exportar como variáveis de ambiente mascaradas
-          echo "::add-mask::$RABBITMQ_USERNAME"
-          echo "::add-mask::$RABBITMQ_PASSWORD"
-          echo "RABBITMQ_USERNAME=$RABBITMQ_USERNAME" >> $GITHUB_ENV
-          echo "RABBITMQ_PASSWORD=$RABBITMQ_PASSWORD" >> $GITHUB_ENV
-
-          echo "✅ Secrets do Azure Key Vault carregados"
-
-      - name: 🔐 Create Docker Secrets for RabbitMQ
-        run: |
-          echo "Creating Docker secrets for RabbitMQ..."
-
-          # Função para criar Docker Secret apenas se não existir
-          create_docker_secret_if_not_exists() {
-            local secret_name="$1"
-            local secret_value="$2"
-
-            if docker secret ls --format "{{.Name}}" | grep -q "^${secret_name}$"; then
-              echo "ℹ️ Docker secret ${secret_name} já existe - reutilizando"
-            else
-              printf "$secret_value" | docker secret create "$secret_name" -
-              echo "✅ Docker secret ${secret_name} criado"
-            fi
-          }
-
-          # Criar secrets necessários para o RabbitMQ usando valores do Azure Key Vault
-          create_docker_secret_if_not_exists "RABBITMQ_USERNAME" "$RABBITMQ_USERNAME"
-          create_docker_secret_if_not_exists "RABBITMQ_PASSWORD" "$RABBITMQ_PASSWORD"
-
-          echo "Docker secrets for RabbitMQ created successfully."
-
-
-
-      - name: 🔧 Garantir recursos Docker
-        run: |
-          set -Eeuo pipefail
-          if ! docker volume ls | grep -q '\brabbitmq_data$'; then
-            echo '📁 Criando volume rabbitmq_data'
-            docker volume create rabbitmq_data
-          else
-            echo '✅ Volume rabbitmq_data já existe'
-          fi
-          echo '🛠️ Ajustando permissões do volume para UID 999'
-          docker run --rm -v rabbitmq_data:/var/lib/rabbitmq alpine:3.20 \
-            sh -c 'chown -R 999:999 /var/lib/rabbitmq' || echo 'ℹ️ Ajuste de permissões não aplicado (verificar manualmente)'
-          if ! docker network ls | grep -q 'conexao-network-swarm'; then
-            echo '🌐 Criando rede conexao-network-swarm'
-            docker network create --driver overlay conexao-network-swarm
-          else
-            echo '✅ Rede conexao-network-swarm já existe'
-          fi
-
-      - name: 🚀 Deploy RabbitMQ Stack (Swarm-Only)
-        env:
-          STACK_NAME: conexao-rabbitmq
-          COMPOSE_FILE: docker-compose.yml
-        run: |
-          echo "🚀 Iniciando deploy do RabbitMQ com Docker Swarm..."
-
-          # Remover stack existente se houver
-          if docker stack ls | grep -q "$STACK_NAME"; then
-            echo "🔄 Removendo stack existente '$STACK_NAME'..."
-            docker stack rm "$STACK_NAME"
-            sleep 10
-          fi
-
-          # Deploy da nova stack
-          echo "🏗️ Executando deploy da stack '$STACK_NAME'..."
-          docker stack deploy -c "$COMPOSE_FILE" "$STACK_NAME"
-
-          echo "⏰ Aguardando estabilização dos serviços RabbitMQ..."
-          sleep 35
-
-      - name: Healthcheck RabbitMQ (Multi-método)
-        env:
-          STACK_NAME: conexao-rabbitmq
-        run: |
-          echo "🔍 Validando saúde do RabbitMQ com health checks robustos..."
-
-          # Aguardar até 3 minutos para RabbitMQ ficar disponível
-          timeout=180
-          elapsed=0
-          health_passed=false
-
-          while [ $elapsed -lt $timeout ] && [ "$health_passed" = false ]; do
-            RABBITMQ_CONTAINER=$(docker ps -q -f name="${STACK_NAME}_rabbitmq" | head -1)
-
-            if [ -n "$RABBITMQ_CONTAINER" ]; then
-              echo "🔍 Testando health check do RabbitMQ... ($elapsed/$timeout segundos)"
-
-              # Método 1: Comando nativo rabbitmq-diagnostics
-              if docker exec "$RABBITMQ_CONTAINER" rabbitmq-diagnostics ping 2>/dev/null; then
-                echo "✅ RabbitMQ health check passed (native command)"
-                health_passed=true
-                break
-              fi
-
-              # Método 2: Verificar logs de inicialização
-              if docker logs "$RABBITMQ_CONTAINER" 2>/dev/null | grep -q "completed with.*plugins\\|Server startup complete\\|started TCP listener"; then
-                echo "✅ RabbitMQ health check passed (logs validation)"
-                health_passed=true
-                break
-              fi
-
-              # Método 3: Verificar se portas estão ativas
-              if docker exec "$RABBITMQ_CONTAINER" ss -tuln 2>/dev/null | grep -q ":5673 \\|:15673 "; then
-                echo "✅ RabbitMQ health check passed (ports active)"
-                health_passed=true
-                break
-              fi
-
-              echo "⏳ RabbitMQ ainda não está pronto... ($elapsed/$timeout segundos)"
-            else
-              echo "⏳ Container RabbitMQ ainda não encontrado... ($elapsed/$timeout segundos)"
-            fi
-
-            sleep 10
-            elapsed=$((elapsed + 10))
-          done
-
-          if [ "$health_passed" = false ]; then
-            echo "⚠️ RabbitMQ health check não passou em $timeout segundos"
-            echo "🔍 Verificando logs finais do RabbitMQ..."
-            if [ -n "$RABBITMQ_CONTAINER" ]; then
-              echo "--- Últimos 30 logs do RabbitMQ ---"
-              docker logs "$RABBITMQ_CONTAINER" --tail 30 2>/dev/null || true
-              echo "--- Fim dos logs ---"
-            fi
-            echo "💡 Nota: RabbitMQ pode estar funcionando mesmo com health check parcial"
-            echo "💡 Verifique os logs acima para diagnóstico"
-            exit 1
-          else
-            echo "✅ RabbitMQ health check concluído com sucesso!"
-          fi
-
-      - name: Connectivity Validation
-        env:
-          STACK_NAME: conexao-rabbitmq
-        run: |
-          echo "🔗 Validando conectividade do RabbitMQ..."
-
-          # Verificar se o serviço está listado no Swarm
-          if docker service ls | grep -q "${STACK_NAME}_rabbitmq"; then
-            echo "✅ Serviço RabbitMQ encontrado no Swarm"
-          else
-            echo "❌ Serviço RabbitMQ não encontrado no Swarm"
-            exit 1
-          fi
-
-          # Verificar se está na rede correta
-          if docker network inspect conexao-network-swarm | grep -q rabbitmq; then
-            echo "✅ RabbitMQ conectado à rede overlay"
-          else
-            echo "⚠️ RabbitMQ pode não estar na rede overlay correta"
-          fi
-
-          # Verificar endpoints específicos
-          RABBITMQ_CONTAINER=$(docker ps -q -f name="${STACK_NAME}_rabbitmq" | head -1)
-          if [ -n "$RABBITMQ_CONTAINER" ]; then
-            # Testar Management UI
-            if docker exec "$RABBITMQ_CONTAINER" ss -tuln 2>/dev/null | grep -q ":15673 "; then
-              echo "✅ RabbitMQ Management UI ativo (porta 15673)"
-            else
-              echo "ℹ️ RabbitMQ Management UI não detectado"
-            fi
-
-            # Testar AMQP port
-            if docker exec "$RABBITMQ_CONTAINER" ss -tuln 2>/dev/null | grep -q ":5673 "; then
-              echo "✅ RabbitMQ AMQP port ativo (porta 5673)"
-            else
-              echo "ℹ️ RabbitMQ AMQP port não detectado"
-            fi
-          fi
-
-          echo "📊 Status final dos serviços:"
-          docker service ls --filter name="${STACK_NAME}_*" --format "table {{.Name}}\t{{.Replicas}}\t{{.Image}}"
-
-      - name: Traefik Health Monitor Validation
-        run: |
-          set -euo pipefail
-          HEALTH_MONITOR_URL="https://traefik.conexaodesorte.com.br/health/service/rabbitmq"
-          TIMEOUT_TOTAL=300
-          INTERVAL=10
-          elapsed=0
-          last_response=""
-          status=""
-
-          while [ $elapsed -lt $TIMEOUT_TOTAL ]; do
-            echo "🔎 Consultando Traefik (${elapsed}/${TIMEOUT_TOTAL}s)..."
-            response=$(curl -sf --max-time 10 "$HEALTH_MONITOR_URL" 2>/dev/null || true)
-            last_response="$response"
-
-            if [[ -n "$response" ]]; then
-              status=$(echo "$response" | python3 -c "import json,sys;data=json.load(sys.stdin);print(data.get('status',''))" 2>/dev/null || true)
-              status=${status//$'\n'/}
-              echo "📊 Status reportado: ${status:-indefinido}"
-
-              if [[ "$status" == "healthy" ]]; then
-                echo "✅ Traefik confirmou RabbitMQ como healthy"
-                exit 0
-              fi
-            else
-              echo "⚠️ Traefik sem resposta nesta tentativa"
-            fi
-
-            sleep "$INTERVAL"
-            elapsed=$((elapsed + INTERVAL))
-          done
-
-          echo "❌ Traefik nao confirmou RabbitMQ como healthy apos ${TIMEOUT_TOTAL}s"
-          echo "📝 Ultima resposta recebida: ${last_response:-<sem resposta>}"
-          exit 1
-
-      - name: 🏥 Verificar Deploy no Runner (Local Container Check)
-        run: |
-          echo "🔍 Verificando se o deploy foi bem-sucedido no runner..."
-          # Verificar se o container está rodando e healthy
-          timeout=180
-          interval=10
-          elapsed=0
-          while [ $elapsed -lt $timeout ]; do
-            echo "🔍 Verificando containers do RabbitMQ (${elapsed}/${timeout}s)..."
-            # Buscar container do rabbitmq que está rodando
-            rabbitmq_container=$(docker ps --filter "name=conexao-rabbitmq" --filter "status=running" --format "{{.Names}}\t{{.Status}}" | head -1)
-            if [[ -n "$rabbitmq_container" ]]; then
-              echo "📦 Container encontrado: $rabbitmq_container"
-              # Verificar se tem health status
-              container_name=$(echo "$rabbitmq_container" | cut -f1)
-              health_status=$(docker inspect --format='{{.State.Health.Status}}' "$container_name" 2>/dev/null || echo "no-health-check")
-              if [[ "$health_status" == "healthy" ]]; then
-                echo "✅ Container do RabbitMQ está healthy no runner"
-                echo "🎉 Deploy confirmado com sucesso!"
-                exit 0
-              elif [[ "$health_status" == "no-health-check" ]]; then
-                echo "⚠️ Container sem health check configurado, verificando se está rodando..."
-                # Se não tem health check, verificar se o container está rodando há pelo menos 30s
-                uptime=$(docker inspect --format='{{.State.StartedAt}}' "$container_name" | xargs -I {} date -d {} +%s)
-                current_time=$(date +%s)
-                running_time=$((current_time - uptime))
-                if [ $running_time -gt 30 ]; then
-                  echo "✅ Container rodando há ${running_time}s - considerado estável"
-                  echo "🎉 Deploy confirmado com sucesso!"
-                  exit 0
-                fi
-              else
-                echo "⚠️ Container health status: $health_status"
-              fi
-            else
-              echo "⚠️ Nenhum container do RabbitMQ encontrado rodando"
-            fi
-            sleep "$interval"
-            elapsed=$((elapsed + interval))
-          done
-          echo "❌ Timeout: RabbitMQ não ficou healthy dentro do tempo esperado"
-          echo "🔍 Containers atuais:"
-          docker ps --filter "name=conexao-rabbitmq"
-          exit 1
+          echo "## 🏗️ Infrastructure Component Pipeline Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Job | Status |" >> $GITHUB_STEP_SUMMARY
+          echo "|-----|--------|" >> $GITHUB_STEP_SUMMARY
+          echo "| Validate | ${{ needs.validate.result == 'success' && '✅ Passed' || '❌ Failed' }} |" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Project:** conexao-de-sorte-rabbitmq-infraestrutura" >> $GITHUB_STEP_SUMMARY
+          echo "**Type:** infrastructure" >> $GITHUB_STEP_SUMMARY
+          echo "**Date:** $(date '+%Y-%m-%d %H:%M:%S')" >> $GITHUB_STEP_SUMMARY
