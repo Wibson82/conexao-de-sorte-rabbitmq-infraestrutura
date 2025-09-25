@@ -146,6 +146,22 @@ jobs:
           tenant-id: ${{ secrets.AZURE_TENANT_ID }}
           subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
 
+      - name: 🔐 Get secrets from Azure Key Vault (via AZ CLI)
+        run: |
+          echo "🔐 Buscando secrets do Azure Key Vault..."
+
+          # Buscar secrets do RabbitMQ
+          RABBITMQ_USERNAME=$(az keyvault secret show --vault-name ${{ vars.AZURE_KEYVAULT_NAME }} --name conexao-de-sorte-rabbitmq-username --query value -o tsv)
+          RABBITMQ_PASSWORD=$(az keyvault secret show --vault-name ${{ vars.AZURE_KEYVAULT_NAME }} --name conexao-de-sorte-rabbitmq-password --query value -o tsv)
+
+          # Exportar como variáveis de ambiente mascaradas
+          echo "::add-mask::$RABBITMQ_USERNAME"
+          echo "::add-mask::$RABBITMQ_PASSWORD"
+          echo "RABBITMQ_USERNAME=$RABBITMQ_USERNAME" >> $GITHUB_ENV
+          echo "RABBITMQ_PASSWORD=$RABBITMQ_PASSWORD" >> $GITHUB_ENV
+
+          echo "✅ Secrets do Azure Key Vault carregados"
+
       - name: 🔐 Create Docker Secrets for RabbitMQ
         run: |
           echo "Creating Docker secrets for RabbitMQ..."
@@ -163,9 +179,9 @@ jobs:
             fi
           }
 
-          # Criar secrets necessários para o RabbitMQ
-          create_docker_secret_if_not_exists "RABBITMQ_USERNAME" "rabbitmq-admin"
-          create_docker_secret_if_not_exists "RABBITMQ_PASSWORD" "rabbitmq-admin-2024!"
+          # Criar secrets necessários para o RabbitMQ usando valores do Azure Key Vault
+          create_docker_secret_if_not_exists "RABBITMQ_USERNAME" "$RABBITMQ_USERNAME"
+          create_docker_secret_if_not_exists "RABBITMQ_PASSWORD" "$RABBITMQ_PASSWORD"
 
           echo "Docker secrets for RabbitMQ created successfully."
 
